@@ -951,3 +951,264 @@ public class MyWebFilter implements WebFilter {
 
 
 
+## 3、R2DBC
+
+#### 1、手写R2DBC
+
+> 用法：
+>
+> 1、导入驱动: 导入连接池（[r2dbc-pool](https://github.com/r2dbc/r2dbc-pool)）、导入驱动（[r2dbc-mysql](https://github.com/asyncer-io/r2dbc-mysql) ）
+>
+> 2、使用驱动提供的API操作
+
+**引入依赖**
+
+```java
+<dependency>
+    <groupId>io.asyncer</groupId>
+    <artifactId>r2dbc-mysql</artifactId>
+    <version>1.0.5</version>
+</dependency>
+```
+
+**手写代码**
+
+```java
+public static void main(String[] args) throws IOException {
+
+    // 创建mysql配置
+    MySqlConnectionConfiguration configuration = MySqlConnectionConfiguration.builder()
+            .host("localhost")
+            .port(3306)
+            .username("root")
+            .password("12345678")
+            .database("test")
+            .build();
+
+    // 获取mysql连接工厂
+    MySqlConnectionFactory factory = MySqlConnectionFactory.from(configuration);
+    Mono.from(
+            factory.create()
+                    .flatMapMany(conn -> conn
+                            .createStatement("select * from customers where customer_id = ?")
+                            .bind(0, 1L)
+                            .execute()
+                    ).flatMap(result ->
+                            result.map(readable -> {
+                                return new Customers(((Integer) readable.get("customer_id")), Objects.requireNonNull(readable.get("customer_name")).toString());
+                            }))
+    ).subscribe(System.out::println);
+
+
+    System.in.read();
+}
+```
+
+
+
+#### 2、Spring Data R2DBC
+
+> 提升生产力方式的 响应式数据库操作
+
+##### **0、整合**
+
+1、导入依赖
+
+```java
+        <!-- https://mvnrepository.com/artifact/io.asyncer/r2dbc-mysql -->
+        <dependency>
+            <groupId>io.asyncer</groupId>
+            <artifactId>r2dbc-mysql</artifactId>
+            <version>1.0.5</version>
+        </dependency>
+        <!--        响应式 Spring Data R2dbc-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-r2dbc</artifactId>
+        </dependency>
+```
+
+2、编写配置
+
+```yml
+spring:
+  r2dbc:
+    password: 123456
+    username: root
+    url: r2dbc:mysql://localhost:3306/test
+    name: test
+```
+
+3、
+
+```java
+@Autowired
+private R2dbcEntityTemplate template;
+
+/**
+ * 测试template  // 适合单表操作，复杂sql不好编写
+ * @throws IOException io异常
+ */
+@Test
+public void springDataR2dbcTest() throws IOException {
+
+    // 1. 构建查询条件
+    Criteria criteria = Criteria
+            .empty()
+            .and("project_leader")
+            .is("1");
+    // 构建Query对象
+    Query query = Query
+            .query(criteria);
+    // 查询数据
+    template.select(query, com.jcq.r2dbc.eneity.Test.class)
+            .subscribe(test -> System.out.println("test = " + test));
+
+    System.out.println(System.in.read());
+}
+
+@Autowired
+private DatabaseClient databaseClient;
+
+/**
+ * 测试databaseClient // 更底层，适合复杂sql 比如join
+ */
+@Test
+public void databaseClientTest() throws IOException {
+
+    databaseClient.sql("select * from test where id in (?,?)")
+            .bind(0, 1)
+            .bind(1, 2)
+            .fetch()        // 抓取数据
+            .all()          // 抓取所有数据
+            .map(a -> new com.jcq.r2dbc.eneity.Test(((Integer) a.get("id")),a.get("project_leader").toString()))
+            .subscribe(a -> System.out.println("a = " + a));
+
+    System.out.println(System.in.read());
+}
+```
+
+
+
+##### 1、声明式接口：R2dbcRepository
+
+**Repository接口**
+
+```java
+@Repository
+public interface TAutherRepository extends R2dbcRepository<TAuther,Long> {
+
+    // 根据命名实现sql
+    Flux<TAuther> findAllByIdAndNameLike(Long id,String name);
+
+    @Query("select * from t_author")
+    Flux<TAuther> queryList();
+}
+
+```
+
+
+
+**自定义Converter**
+
+```java
+@ReadingConverter  // 读取数据库的时候，吧row转成 TBook
+public class TBookConverter implements Converter<Row, TBook> {
+    @Override
+    public TBook convert(Row source) {
+
+        TBook tBook = new TBook();
+        tBook.setId((Long) source.get("id"));
+        tBook.setTitle((String) source.get("title"));
+        tBook.setAuthorId((Long) source.get("author_id"));
+        Object instance = source.get("publish_time");
+        System.out.println(instance);
+        ZonedDateTime instance1 = (ZonedDateTime) instance;
+        tBook.setPublishTime(instance1.toInstant());
+
+        TAuther tAuther = new TAuther();
+        tAuther.setName(source.get("name", String.class));
+        tBook.setTAuther(tAuther);
+        return tBook;
+    }
+}
+```
+
+
+
+**配置生效**
+
+```java
+@Configuration
+public class R2DbcConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public R2dbcCustomConversions r2dbcCustomConversions() {
+
+        return R2dbcCustomConversions.of(MySqlDialect.INSTANCE, new TBookConverter());
+    }
+}
+
+```
+
+
+
+#### 3、编程式组件
+
+- R2dbcEntityTemplate
+- DatabaseClient
+
+
+
+#### 4、最佳实践
+
+> 最佳实践：  提升生产效率的做法
+>
+> - 1、Spring Data R2DBC，基础的CRUD用 **R2dbcRepository** 提供好了
+> - 2、自定义复杂的SQL（**单表**）： **@Query**；
+> - 3、**多表查询复杂结果集**： **DatabaseClient** 自定义SQL及结果封装；
+>
+> - **@Query + 自定义 Converter 实现结果封装**
+>
+> **经验：**
+>
+> - **1-1:1-N 关联关系的封装都需要自定义结果集的方式**
+>
+> - **Spring Data R2DBC：**
+>
+> - **自定义Converter指定结果封装**
+> - **DatabaseClient：贴近底层的操作进行封装; 见下面代码**
+>
+> - **MyBatis：  自定义 ResultMap 标签去来封装**
+
+
+
+```java
+databaseClient.sql("select b.*,t.name as name from t_book b " +
+                "LEFT JOIN t_author t on b.author_id = t.id " +
+                "WHERE b.id = ?")
+        .bind(0, 1L)
+        .fetch()
+        .all()
+        .map(row-> {
+            String id = row.get("id").toString();
+            String title = row.get("title").toString();
+            String author_id = row.get("author_id").toString();
+            String name = row.get("name").toString();
+            TBook tBook = new TBook();
+
+            tBook.setId(Long.parseLong(id));
+            tBook.setTitle(title);
+
+            TAuthor tAuthor = new TAuthor();
+            tAuthor.setName(name);
+            tAuthor.setId(Long.parseLong(author_id));
+
+            tBook.setAuthor(tAuthor);
+
+            return tBook;
+        })
+        .subscribe(tBook -> System.out.println("tBook = " + tBook));
+```
+
